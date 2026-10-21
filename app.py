@@ -1,11 +1,8 @@
 import streamlit as st
 from google import genai
 from google.genai import types
+from pypdf import PdfReader
 import glob
-import shutil
-import tempfile
-import os
-import time
 
 # 1. إعدادات الصفحة وتصميم الواجهة
 st.set_page_config(
@@ -14,7 +11,7 @@ st.set_page_config(
     layout="centered"
 )
 
-# 2. تنسيق CSS مخصص ومضبوط لدعم اللغة العربية بدون تشويه القائمة الجانبية
+# 2. تنسيق CSS لدعم اللغة العربية
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Tajawal:wght@400;700&display=swap');
@@ -22,11 +19,7 @@ st.markdown("""
     html, body, .stApp {
         font-family: 'Tajawal', sans-serif;
     }
-    .main .block-container {
-        direction: rtl;
-        text-align: right;
-    }
-    section[data-testid="stSidebar"] .block-container {
+    .main .block-container, section[data-testid="stSidebar"] .block-container {
         direction: rtl;
         text-align: right;
     }
@@ -51,7 +44,7 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# 3. جلب مفتاح الـ API بأمان
+# 3. جلب مفتاح الـ API
 api_key = st.secrets.get("GEMINI_API_KEY", "").strip()
 if not api_key:
     st.error("⚠️ يرجى إضافة مفتاح GEMINI_API_KEY في إعدادات الموقع (Secrets).")
@@ -59,24 +52,27 @@ if not api_key:
 
 client = genai.Client(api_key=api_key)
 
-# 4. قراءة جميع ملفات الـ PDF
-@st.cache_resource(show_spinner="جاري تجهيز وتحليل أدلة الماجستير...")
-def load_all_pdfs():
-    uploaded_refs = []
+# 4. قراءة النصوص من ملفات الـ PDF فوراً في أقل من ثانية!
+@st.cache_resource(show_spinner="جاري قراءة أدلة الماجستير...")
+def extract_all_pdfs_text():
     pdf_files = sorted(glob.glob("*.pdf"))
+    combined_text = ""
     
-    for idx, pdf in enumerate(pdf_files):
-        temp_path = os.path.join(tempfile.gettempdir(), f"doc_{idx}.pdf")
-        shutil.copyfile(pdf, temp_path)
-        
-        g_file = client.files.upload(file=temp_path)
-        uploaded_refs.append(g_file)
-        
-        os.remove(temp_path)
-        
-    return uploaded_refs, pdf_files
+    for pdf in pdf_files:
+        try:
+            reader = PdfReader(pdf)
+            combined_text += f"\n\n=== بداية مستند: {pdf} ===\n"
+            for page_num, page in enumerate(reader.pages, 1):
+                text = page.extract_text()
+                if text:
+                    combined_text += f"\n[صفحة {page_num}]\n{text}"
+            combined_text += f"\n=== نهاية مستند: {pdf} ===\n"
+        except Exception as e:
+            pass
+            
+    return combined_text, pdf_files
 
-gemini_files, file_names = load_all_pdfs()
+docs_text, file_names = extract_all_pdfs_text()
 
 # 5. القائمة الجانبية لعرض المصادر الموجودة
 with st.sidebar:
@@ -113,35 +109,7 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# 9. دالة ذكية للتغلب على ضغط الخوادم (503) تلقائياً
-def generate_smart_answer(contents, system_instruction):
-    # قائمة النماذج بالترتيب في حال كان أحدها مشغولاً
-    models_to_try = ["gemini-3.8-flash", "gemini-3.8-pro", "gemini-2.0-flash"]
-    
-    for attempt in range(3): # 3 محاولات تلقائية
-        for model_name in models_to_try:
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=contents,
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_instruction,
-                        temperature=0.0
-                    )
-                )
-                return response.text
-            except Exception as e:
-                err_str = str(e)
-                if "503" in err_str or "UNAVAILABLE" in err_str or "429" in err_str:
-                    time.sleep(2) # انتظار ثانيتين ثم المحاولة مجدداً
-                    continue
-                elif "404" in err_str or "NOT_FOUND" in err_str:
-                    continue # تجربة النموذج التالي في القائمة
-                else:
-                    raise e
-    raise Exception("الخادم مشغول جداً حالياً، يرجى المحاولة بعد قليل.")
-
-# 10. استقبال سؤال المستخدم وتوليد الإجابة
+# 9. استقبال سؤال المستخدم وتوليد الإجابة بسرعة فائقة
 user_input = st.chat_input("اكتبي سؤالك هنا...")
 prompt = quick_question or user_input
 
@@ -151,22 +119,43 @@ if prompt:
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        with st.spinner("جاري البحث في الأدلة الرسمية..."):
+        with st.spinner("جاري كتابة الإجابة..."):
             try:
-                system_instruction = """
+                system_instruction = f"""
                 أنت مرشد أكاديمي رسمي لمرحلة الماجستير في الجامعة.
-                مهمتك الإجابة على أسئلة الطلاب بالاعتماد حصرياً وفقط على ملفات الـ PDF المرفقة.
+                مهمتك الإجابة على أسئلة الطلاب بالاعتماد حصرياً وفقط على النصوص المستخرجة من الأدلة الرسمية التالية:
+                
+                {docs_text}
+                
                 القواعد الصارمة:
-                1. لا تؤلف أو تضف أي معلومة من خارج الملفات المرفقة نهائياً.
-                2. إذا لم تجد الإجابة في الملفات، قل: "عذراً، هذه المعلومة غير مذكورة في الأدلة الرسمية المتوفرة حالياً."
-                3. اذكر اسم البرنامج أو الدليل الذي أخذت منه المعلومة لتكون إجابتك موثقة.
+                1. لا تؤلف أو تضف أي معلومة من خارج النصوص المرفقة أعلاه نهائياً.
+                2. إذا لم تجد الإجابة في النصوص، قل: "عذراً، هذه المعلومة غير مذكورة في الأدلة الرسمية المتوفرة حالياً."
+                3. اذكر اسم البرنامج أو المستند الذي أخذت منه المعلومة لتكون إجابتك موثقة.
                 4. نسّق الإجابة بشكل جميل باستخدام النقاط والعناوين الواضحة.
                 """
 
-                contents = gemini_files + [prompt]
-                answer = generate_smart_answer(contents, system_instruction)
+                response = client.models.generate_content(
+                    model="gemini-3.8-flash",
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        temperature=0.0,
+                        thinking_config=types.ThinkingConfig(thinking_budget=0) # لإلغاء وقت التفكير الطويل والرد فوراً
+                    )
+                )
                 
+                answer = response.text
                 st.markdown(answer)
                 st.session_state.messages.append({"role": "assistant", "content": answer})
             except Exception as e:
-                st.error(f"⚠️ {e}")
+                # في حال عدم دعم إعداد التفكير أو انشغال الخادم يجرب الطلب المباشر
+                try:
+                    response = client.models.generate_content(
+                        model="gemini-3.8-flash",
+                        contents=f"المصادر الرسمية:\n{docs_text}\n\nسؤال الطالب: {prompt}\nأجب من المصادر فقط وبدقة:",
+                    )
+                    answer = response.text
+                    st.markdown(answer)
+                    st.session_state.messages.append({"role": "assistant", "content": answer})
+                except Exception as e2:
+                    st.error(f"حدث خطأ: {e2}")
