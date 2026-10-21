@@ -5,6 +5,7 @@ import glob
 import shutil
 import tempfile
 import os
+import time
 
 # 1. إعدادات الصفحة وتصميم الواجهة
 st.set_page_config(
@@ -13,13 +14,19 @@ st.set_page_config(
     layout="centered"
 )
 
-# 2. تنسيق CSS مخصص لدعم اللغة العربية وتجميل الألوان والخطوط
+# 2. تنسيق CSS مخصص ومضبوط لدعم اللغة العربية بدون تشويه القائمة الجانبية
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Tajawal:wght@400;700&display=swap');
     
-    html, body, [class*="css"] {
+    html, body, .stApp {
         font-family: 'Tajawal', sans-serif;
+    }
+    .main .block-container {
+        direction: rtl;
+        text-align: right;
+    }
+    section[data-testid="stSidebar"] .block-container {
         direction: rtl;
         text-align: right;
     }
@@ -44,7 +51,7 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# 3. جلب مفتاح الـ API بأمان وتنظيفه من أي مسافات
+# 3. جلب مفتاح الـ API بأمان
 api_key = st.secrets.get("GEMINI_API_KEY", "").strip()
 if not api_key:
     st.error("⚠️ يرجى إضافة مفتاح GEMINI_API_KEY في إعدادات الموقع (Secrets).")
@@ -52,7 +59,7 @@ if not api_key:
 
 client = genai.Client(api_key=api_key)
 
-# 4. قراءة جميع ملفات الـ PDF مع حل مشكلة الأسماء العربية
+# 4. قراءة جميع ملفات الـ PDF
 @st.cache_resource(show_spinner="جاري تجهيز وتحليل أدلة الماجستير...")
 def load_all_pdfs():
     uploaded_refs = []
@@ -71,7 +78,7 @@ def load_all_pdfs():
 
 gemini_files, file_names = load_all_pdfs()
 
-# 5. القائمة الجانبية لعرض المصادر الموجودة بأسمائها العربية الأصلية
+# 5. القائمة الجانبية لعرض المصادر الموجودة
 with st.sidebar:
     st.header("📚 الأدلة والمصادر المعتمدة")
     st.write(f"يعتمد البوت حالياً على **{len(file_names)}** ملفات:")
@@ -106,7 +113,35 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# 9. استقبال سؤال المستخدم وتوليد الإجابة
+# 9. دالة ذكية للتغلب على ضغط الخوادم (503) تلقائياً
+def generate_smart_answer(contents, system_instruction):
+    # قائمة النماذج بالترتيب في حال كان أحدها مشغولاً
+    models_to_try = ["gemini-3.8-flash", "gemini-3.8-pro", "gemini-2.0-flash"]
+    
+    for attempt in range(3): # 3 محاولات تلقائية
+        for model_name in models_to_try:
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        temperature=0.0
+                    )
+                )
+                return response.text
+            except Exception as e:
+                err_str = str(e)
+                if "503" in err_str or "UNAVAILABLE" in err_str or "429" in err_str:
+                    time.sleep(2) # انتظار ثانيتين ثم المحاولة مجدداً
+                    continue
+                elif "404" in err_str or "NOT_FOUND" in err_str:
+                    continue # تجربة النموذج التالي في القائمة
+                else:
+                    raise e
+    raise Exception("الخادم مشغول جداً حالياً، يرجى المحاولة بعد قليل.")
+
+# 10. استقبال سؤال المستخدم وتوليد الإجابة
 user_input = st.chat_input("اكتبي سؤالك هنا...")
 prompt = quick_question or user_input
 
@@ -129,18 +164,9 @@ if prompt:
                 """
 
                 contents = gemini_files + [prompt]
-
-                response = client.models.generate_content(
-                    model="gemini-3.8-flash",
-                    contents=contents,
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_instruction,
-                        temperature=0.0
-                    )
-                )
+                answer = generate_smart_answer(contents, system_instruction)
                 
-                answer = response.text
                 st.markdown(answer)
                 st.session_state.messages.append({"role": "assistant", "content": answer})
             except Exception as e:
-                st.error(f"حدث خطأ: {e}")
+                st.error(f"⚠️ {e}")
