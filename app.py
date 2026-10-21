@@ -59,7 +59,6 @@ def load_all_pdfs():
     pdf_files = sorted(glob.glob("*.pdf"))
     
     for idx, pdf in enumerate(pdf_files):
-        # إنشاء نسخة مؤقتة باسم إنجليزي لتفادي خطأ UnicodeEncodeError عند الرفع
         temp_path = os.path.join(tempfile.gettempdir(), f"doc_{idx}.pdf")
         shutil.copyfile(pdf, temp_path)
         
@@ -132,7 +131,7 @@ if prompt:
                 contents = gemini_files + [prompt]
 
                 response = client.models.generate_content(
-                    model="gemini-2.5-flash",
+                    model="gemini-3.8-flash",
                     contents=contents,
                     config=types.GenerateContentConfig(
                         system_instruction=system_instruction,
