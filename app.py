@@ -3,6 +3,7 @@ from google import genai
 from google.genai import types
 from pypdf import PdfReader
 import glob
+import re
 
 # 1. إعدادات الصفحة وتصميم الواجهة
 st.set_page_config(
@@ -52,32 +53,54 @@ if not api_key:
 
 client = genai.Client(api_key=api_key)
 
-# 4. قراءة النصوص من ملفات الـ PDF فوراً في أقل من ثانية!
-@st.cache_resource(show_spinner="جاري قراءة أدلة الماجستير...")
-def extract_all_pdfs_text():
+# 4. قراءة وتقسيم ملفات الـ PDF إلى فقرات صغيرة لسرعة البحث
+@st.cache_resource(show_spinner="جاري تجهيز أدلة الماجستير...")
+def load_pdf_chunks():
     pdf_files = sorted(glob.glob("*.pdf"))
-    combined_text = ""
+    chunks = []
     
     for pdf in pdf_files:
         try:
             reader = PdfReader(pdf)
-            combined_text += f"\n\n=== بداية مستند: {pdf} ===\n"
             for page_num, page in enumerate(reader.pages, 1):
                 text = page.extract_text()
-                if text:
-                    combined_text += f"\n[صفحة {page_num}]\n{text}"
-            combined_text += f"\n=== نهاية مستند: {pdf} ===\n"
-        except Exception as e:
+                if text and text.strip():
+                    chunks.append({
+                        "source": pdf,
+                        "page": page_num,
+                        "text": text.strip()
+                    })
+        except Exception:
             pass
             
-    return combined_text, pdf_files
+    return chunks, pdf_files
 
-docs_text, file_names = extract_all_pdfs_text()
+all_chunks, file_names = load_pdf_chunks()
+
+# دالة البحث السريع: تختار أهم الصفحات المرتبطة بالسؤال فقط لتوفير الوقت!
+def get_relevant_context(query, chunks, top_k=10):
+    if not chunks:
+        return "لا توجد نصوص مستخرجة من الملفات."
+    
+    words = [w for w in re.findall(r'\w+', query) if len(w) > 2]
+    scored_chunks = []
+    
+    for c in chunks:
+        score = sum(1 for w in words if w in c["text"] or w in c["source"])
+        scored_chunks.append((score, c))
+        
+    scored_chunks.sort(key=lambda x: x[0], reverse=True)
+    selected = [x[1] for x in scored_chunks[:top_k]]
+    
+    context_text = ""
+    for item in selected:
+        context_text += f"\n--- [المصدر: {item['source']} | صفحة: {item['page']}] ---\n{item['text']}\n"
+    return context_text
 
 # 5. القائمة الجانبية لعرض المصادر الموجودة
 with st.sidebar:
     st.header("📚 الأدلة والمصادر المعتمدة")
-    st.write(f"يعتمد البوت حالياً على **{len(file_names)}** ملفات:")
+    st.write(f"يعتمد البوت حالياً على **{len(file_names)}** ملفات ({len(all_chunks)} صفحة):")
     for name in file_names:
         st.caption(f"📄 {name}")
     
@@ -109,7 +132,7 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# 9. استقبال سؤال المستخدم وتوليد الإجابة بسرعة فائقة
+# 9. استقبال السؤال والرد الفوري المتدفق (Streaming)
 user_input = st.chat_input("اكتبي سؤالك هنا...")
 prompt = quick_question or user_input
 
@@ -119,43 +142,56 @@ if prompt:
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        with st.spinner("جاري كتابة الإجابة..."):
-            try:
-                system_instruction = f"""
-                أنت مرشد أكاديمي رسمي لمرحلة الماجستير في الجامعة.
-                مهمتك الإجابة على أسئلة الطلاب بالاعتماد حصرياً وفقط على النصوص المستخرجة من الأدلة الرسمية التالية:
-                
-                {docs_text}
-                
-                القواعد الصارمة:
-                1. لا تؤلف أو تضف أي معلومة من خارج النصوص المرفقة أعلاه نهائياً.
-                2. إذا لم تجد الإجابة في النصوص، قل: "عذراً، هذه المعلومة غير مذكورة في الأدلة الرسمية المتوفرة حالياً."
-                3. اذكر اسم البرنامج أو المستند الذي أخذت منه المعلومة لتكون إجابتك موثقة.
-                4. نسّق الإجابة بشكل جميل باستخدام النقاط والعناوين الواضحة.
-                """
+        response_placeholder = st.empty()
+        response_placeholder.markdown("⏳ *جاري استخراج المعلومة...*")
+        
+        # جلب الصفحات المهمة فقط للسؤال في جزء من الثانية
+        relevant_docs = get_relevant_context(prompt, all_chunks, top_k=10)
+        
+        full_prompt = f"""أنت مرشد أكاديمي رسمي لمرحلة الماجستير في الجامعة.
+أجب على سؤال الطالب بالاعتماد حصرياً وفقط على النصوص المرفقة أدناه من الأدلة الرسمية.
+- لا تضف أي معلومة من خارج النصوص.
+- إذا لم تجد الإجابة، قل: "عذراً، هذه المعلومة غير مذكورة في الأدلة الرسمية المتوفرة."
+- اذكر اسم البرنامج أو المصدر عند الإجابة، ونسّق إجابتك في نقاط واضحة.
 
-                response = client.models.generate_content(
-                    model="gemini-3.8-flash",
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_instruction,
-                        temperature=0.0,
-                        thinking_config=types.ThinkingConfig(thinking_budget=0) # لإلغاء وقت التفكير الطويل والرد فوراً
-                    )
+النصوص المستخرجة من الأدلة الرسمية:
+{relevant_docs}
+
+سؤال الطالب: {prompt}"""
+
+        full_answer = ""
+        try:
+            # استخدام البث المباشر (Stream) مع تقليل وقت التفكير للرد في ثانية واحدة
+            stream = client.models.generate_content_stream(
+                model="gemini-3.8-flash",
+                contents=full_prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.0,
+                    thinking_config=types.ThinkingConfig(thinking_level="minimal")
                 )
+            )
+            for chunk in stream:
+                if chunk.text:
+                    full_answer += chunk.text
+                    response_placeholder.markdown(full_answer + " ▌")
+            
+            response_placeholder.markdown(full_answer)
+            st.session_state.messages.append({"role": "assistant", "content": full_answer})
+            
+        except Exception:
+            # خطة بديلة فورية في حال عدم قبول إعداد التفكير
+            try:
+                stream = client.models.generate_content_stream(
+                    model="gemini-3.8-flash",
+                    contents=full_prompt,
+                    config=types.GenerateContentConfig(temperature=0.0)
+                )
+                for chunk in stream:
+                    if chunk.text:
+                        full_answer += chunk.text
+                        response_placeholder.markdown(full_answer + " ▌")
                 
-                answer = response.text
-                st.markdown(answer)
-                st.session_state.messages.append({"role": "assistant", "content": answer})
-            except Exception as e:
-                # في حال عدم دعم إعداد التفكير أو انشغال الخادم يجرب الطلب المباشر
-                try:
-                    response = client.models.generate_content(
-                        model="gemini-3.8-flash",
-                        contents=f"المصادر الرسمية:\n{docs_text}\n\nسؤال الطالب: {prompt}\nأجب من المصادر فقط وبدقة:",
-                    )
-                    answer = response.text
-                    st.markdown(answer)
-                    st.session_state.messages.append({"role": "assistant", "content": answer})
-                except Exception as e2:
-                    st.error(f"حدث خطأ: {e2}")
+                response_placeholder.markdown(full_answer)
+                st.session_state.messages.append({"role": "assistant", "content": full_answer})
+            except Exception as e2:
+                response_placeholder.error(f"⚠️ الخادم مشغول حالياً، يرجى المحاولة بعد لحظات: {e2}")
