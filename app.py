@@ -2,9 +2,11 @@ import streamlit as st
 from google import genai
 from google.genai import types
 import glob
+import shutil
+import tempfile
 import os
 
-# 1. إعدادات الصفحة وتصميم الواجهة (تقدرين تغيرين الاسم والأيقونة على كيفك)
+# 1. إعدادات الصفحة وتصميم الواجهة
 st.set_page_config(
     page_title="المرشد الأكاديمي لبرامج الماجستير",
     page_icon="🎓",
@@ -42,27 +44,35 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# 3. جلب مفتاح الـ API بأمان
-api_key = st.secrets.get("GEMINI_API_KEY", None)
+# 3. جلب مفتاح الـ API بأمان وتنظيفه من أي مسافات
+api_key = st.secrets.get("GEMINI_API_KEY", "").strip()
 if not api_key:
     st.error("⚠️ يرجى إضافة مفتاح GEMINI_API_KEY في إعدادات الموقع (Secrets).")
     st.stop()
 
 client = genai.Client(api_key=api_key)
 
-# 4. قراءة جميع ملفات الـ PDF الموجودة في المشروع تلقائياً
+# 4. قراءة جميع ملفات الـ PDF مع حل مشكلة الأسماء العربية
 @st.cache_resource(show_spinner="جاري تجهيز وتحليل أدلة الماجستير...")
 def load_all_pdfs():
     uploaded_refs = []
-    pdf_files = glob.glob("*.pdf") # يبحث عن أي ملف PDF رفعتيه
-    for pdf in pdf_files:
-        g_file = client.files.upload(file=pdf)
+    pdf_files = sorted(glob.glob("*.pdf"))
+    
+    for idx, pdf in enumerate(pdf_files):
+        # إنشاء نسخة مؤقتة باسم إنجليزي لتفادي خطأ UnicodeEncodeError عند الرفع
+        temp_path = os.path.join(tempfile.gettempdir(), f"doc_{idx}.pdf")
+        shutil.copyfile(pdf, temp_path)
+        
+        g_file = client.files.upload(file=temp_path)
         uploaded_refs.append(g_file)
+        
+        os.remove(temp_path)
+        
     return uploaded_refs, pdf_files
 
 gemini_files, file_names = load_all_pdfs()
 
-# 5. القائمة الجانبية لعرض المصادر الموجودة
+# 5. القائمة الجانبية لعرض المصادر الموجودة بأسمائها العربية الأصلية
 with st.sidebar:
     st.header("📚 الأدلة والمصادر المعتمدة")
     st.write(f"يعتمد البوت حالياً على **{len(file_names)}** ملفات:")
@@ -80,7 +90,7 @@ if "messages" not in st.session_state:
         {"role": "assistant", "content": "مرحباً بك! 👋 أنا مساعدك الأكاديمي الذكي. كيف يمكنني مساعدتك اليوم في برامج الماجستير؟"}
     ]
 
-# 7. أزرار الأسئلة السريعة (تقدرين تعدلينها على كيفك)
+# 7. أزرار الأسئلة السريعة
 st.write("💡 **أسئلة شائعة سريعة:**")
 col1, col2, col3 = st.columns(3)
 quick_question = None
@@ -97,17 +107,15 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# 9. استقبال سؤال المستخدم (سواء بالكتابة أو بالضغط على زر)
+# 9. استقبال سؤال المستخدم وتوليد الإجابة
 user_input = st.chat_input("اكتبي سؤالك هنا...")
 prompt = quick_question or user_input
 
 if prompt:
-    # عرض سؤال المستخدم
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # توليد الإجابة من الملفات فقط
     with st.chat_message("assistant"):
         with st.spinner("جاري البحث في الأدلة الرسمية..."):
             try:
